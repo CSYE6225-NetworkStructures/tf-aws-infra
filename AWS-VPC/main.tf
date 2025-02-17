@@ -3,14 +3,23 @@ provider "aws" {
   profile = var.aws_profile
 }
 
-# Create VPC
+# Find existing VPCs with "Demo-VPC" prefix
+data "aws_vpcs" "existing_vpcs" {}
+
+# Determine new VPC name
+locals {
+  vpc_count  = length(data.aws_vpcs.existing_vpcs.ids) + 1
+  vpc_name   = "Demo-VPC-${local.vpc_count}"
+}
+
+# Create VPC with a unique name
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = {
-    Name = "Demo-VPC"
+    Name = local.vpc_name
   }
 }
 
@@ -23,7 +32,7 @@ resource "aws_subnet" "public_subnets" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "Public-Subnet-${count.index}"
+    Name = "${local.vpc_name}-Public-Subnet-${count.index}"
   }
 }
 
@@ -35,16 +44,16 @@ resource "aws_subnet" "private_subnets" {
   availability_zone = var.availability_zones[count.index]
 
   tags = {
-    Name = "Private-Subnet-${count.index}"
+    Name = "${local.vpc_name}-Private-Subnet-${count.index}"
   }
 }
 
-# Create Internet Gateway (For Public Subnets)
+# Create Internet Gateway
 resource "aws_internet_gateway" "gw" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "Internet-Gateway"
+    Name = "${local.vpc_name}-Internet-Gateway" 
   }
 }
 
@@ -58,7 +67,7 @@ resource "aws_route_table" "public_rt" {
   }
 
   tags = {
-    Name = "Public-Route-Table"
+    Name = "${local.vpc_name}-Public-Route-Table"
   }
 }
 
@@ -69,12 +78,12 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public_rt.id
 }
 
-# Create Private Route Table (Only Internal Communication)
+# Create Private Route Table
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "Private-Route-Table"
+    Name = "${local.vpc_name}-Private-Route-Table" 
   }
 }
 

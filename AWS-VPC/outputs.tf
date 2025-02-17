@@ -2,6 +2,10 @@ output "vpc_id" {
   value = aws_vpc.main.id
 }
 
+output "vpc_name" {
+  value = local.vpc_name
+}
+
 output "public_subnet_ids" {
   value = aws_subnet.public_subnets[*].id
 }

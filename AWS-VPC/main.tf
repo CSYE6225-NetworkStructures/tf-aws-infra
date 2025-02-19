@@ -1,6 +1,6 @@
 provider "aws" {
   region  = var.aws_region
-  profile = "demo1"
+  profile = var.aws_profile
 }
 
 # Fetch the first 3 availability zones for the selected region

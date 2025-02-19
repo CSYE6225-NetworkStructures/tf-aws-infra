@@ -1,32 +1,32 @@
 name: Terraform CI
 
 on:
- pull_request:
-   branches:
-     - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
- terraform-checks:
-   name: Run Terraform Checks
-   runs-on: ubuntu-latest
+  terraform-checks:
+    name: Run Terraform Checks
+    runs-on: ubuntu-latest
 
-   steps:
-     - name: Checkout Repository
-       uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-     - name: Install Terraform
-       uses: hashicorp/setup-terraform@v3
-       with:
-         terraform_version: latest
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
 
-     - name: Terraform Format Check
-       run: terraform fmt -check -recursive
-       working-directory: AWS-VPC
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: AWS-VPC
+        
+      - name: Terraform Init
+        run: terraform init 
+        working-directory: AWS-VPC
 
-     - name: Terraform Init
-       run: terraform init 
-       working-directory: AWS-VPC
-
-     - name: Terraform Validate
-       run: terraform validate
-       working-directory: AWS-VPC
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: AWS-VPC

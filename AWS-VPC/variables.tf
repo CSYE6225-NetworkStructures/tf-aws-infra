@@ -5,9 +5,23 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "AWS CLI profile to use"
+  description = "AWS CLI profile to use (if available)"
   type        = string
-  default     = "your_aws_profile"
+  default     = ""
+}
+
+variable "aws_access_key" {
+  description = "AWS access key (fallback if profile is not available)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_secret_key" {
+  description = "AWS secret key (fallback if profile is not available)"
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "vpc_cidr" {

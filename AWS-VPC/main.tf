@@ -1,6 +1,9 @@
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+  # Use the profile if it's specified and valid, otherwise use access/secret keys
+  profile    = try(var.aws_profile, null) != "" ? var.aws_profile : null
+  access_key = try(var.aws_profile, null) == "" ? var.aws_access_key : null
+  secret_key = try(var.aws_profile, null) == "" ? var.aws_secret_key : null
 }
 
 # Fetch the first 3 availability zones for the selected region

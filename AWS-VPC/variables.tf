@@ -35,3 +35,20 @@ variable "subnet_count" {
   type        = number
   default     = 3
 }
+
+variable "ami_id" {
+  description = "Custom AMI ID for EC2"
+  type        = string
+}
+
+variable "key_name" {
+  description = "SSH key pair name for EC2"
+  type        = string
+}
+
+variable "app_port" {
+  description = "Port number on which the application runs"
+  type        = number
+  default     = 8080
+}
+

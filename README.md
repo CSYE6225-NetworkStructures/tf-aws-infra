@@ -1,7 +1,7 @@
 #  tf-aws-infra
 **Terraform Infrastructure for AWS**  
 
-This repository contains Terraform configuration to provision AWS infrastructure, including the **AWS VPC** module. It uses **GitHub Actions for Continuous Integration (CI)** to check formatting and validate Terraform code.
+This repository contains Terraform configuration to provision AWS infrastructure, including the **AWS VPC** and **AWS EC2** module. It uses **GitHub Actions for Continuous Integration (CI)** to check formatting and validate Terraform code.
 
 ---
 

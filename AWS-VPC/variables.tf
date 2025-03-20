@@ -1,24 +1,24 @@
 variable "aws_region" {
-  description = "AWS region where resources will be created"
+  description = "AWS region to deploy resources"
   type        = string
   default     = "us-east-1"
 }
 
 variable "aws_profile" {
-  description = "AWS CLI profile to use (if available)"
+  description = "AWS CLI profile to use (optional)"
   type        = string
-  default     = ""
+  default     = "ass5"
 }
 
 variable "aws_access_key" {
-  description = "AWS access key (fallback if profile is not available)"
+  description = "AWS access key (used if profile is not specified)"
   type        = string
   default     = ""
   sensitive   = true
 }
 
 variable "aws_secret_key" {
-  description = "AWS secret key (fallback if profile is not available)"
+  description = "AWS secret key (used if profile is not specified)"
   type        = string
   default     = ""
   sensitive   = true
@@ -27,28 +27,70 @@ variable "aws_secret_key" {
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
   type        = string
-  default     = "10.10.0.0/16"
+  default     = "10.0.0.0/16"
 }
 
 variable "subnet_count" {
-  description = "Number of subnets (1 public & 1 private per AZ)"
+  description = "Number of subnets to create (both public and private)"
   type        = number
   default     = 3
 }
 
-variable "ami_id" {
-  description = "Custom AMI ID for EC2"
-  type        = string
-}
-
-variable "key_name" {
-  description = "SSH key pair name for EC2"
-  type        = string
-}
-
 variable "app_port" {
-  description = "Port number on which the application runs"
+  description = "Port for the application"
   type        = number
   default     = 8080
 }
 
+variable "ami_id" {
+  description = "AMI ID for EC2 instance"
+  type        = string
+}
+
+variable "key_name" {
+  description = "Name of the SSH key pair to use for EC2 instance"
+  type        = string
+}
+
+variable "db_engine" {
+  description = "Database engine (mysql, mariadb, or postgres)"
+  type        = string
+  default     = "mysql"
+}
+
+variable "db_engine_version" {
+  description = "Version of the database engine"
+  type        = string
+  default     = "8.0"
+}
+
+variable "db_parameter_group_family" {
+  description = "The family of the DB parameter group"
+  type        = string
+  default     = "mysql8.0"
+}
+
+variable "db_instance_class" {
+  description = "Instance class for the RDS instance"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "db_port" {
+  description = "Port for the database (3306 for MySQL/MariaDB, 5432 for PostgreSQL)"
+  type        = number
+  default     = 3306
+}
+
+variable "db_password" {
+  description = "Password for the database master user"
+  type        = string
+  sensitive   = true
+  default     = "Welcome1234"
+}
+
+variable "user_data_script_path" {
+  description = "Path to the user data script file"
+  type        = string
+  default     = "setup.sh"
+}

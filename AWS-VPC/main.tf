@@ -6,8 +6,13 @@ provider "aws" {
   secret_key = try(var.aws_profile, null) == "" ? var.aws_secret_key : null
 }
 
-# Random UUID for S3 bucket
-resource "random_uuid" "s3_bucket_uuid" {}
+# Random UUID for S3 bucket and other resources
+resource "random_uuid" "resource_uuid" {}
+
+# Generate a shorter identifier for resource names
+locals {
+  resource_suffix = substr(random_uuid.resource_uuid.result, 0, 8)
+}
 
 # Fetch the first 3 availability zones for the selected region
 data "aws_availability_zones" "available" {}
@@ -26,7 +31,7 @@ locals {
   unique_vpc_name = "${local.base_vpc_name}-${local.existing_vpc_count}"
 
   # Create lowercase versions for DB resources that have naming restrictions
-  lowercase_vpc_name = "demovpc${local.existing_vpc_count}"
+  lowercase_vpc_name = "vpc${local.existing_vpc_count}${local.resource_suffix}"
 
   # Select the first 3 AZs dynamically
   availability_zones = slice(data.aws_availability_zones.available.names, 0, var.subnet_count)
@@ -36,7 +41,17 @@ locals {
   private_subnet_cidrs = [for i in range(var.subnet_count) : cidrsubnet(var.vpc_cidr, 8, i + var.subnet_count)]
 
   # Generate S3 bucket name with UUID
-  bucket_name = "csye6225-${random_uuid.s3_bucket_uuid.result}"
+  bucket_name = "csye6225-${random_uuid.resource_uuid.result}"
+
+  # Generate unique names for IAM resources
+  iam_role_name     = "ec2-role-${local.resource_suffix}"
+  iam_policy_prefix = "policy-${local.resource_suffix}"
+  iam_profile_name  = "ec2-profile-${local.resource_suffix}"
+
+  # DB resource names
+  db_subnet_group_name    = "db-subnet-group-${local.resource_suffix}"
+  db_parameter_group_name = "db-param-group-${local.resource_suffix}"
+  db_identifier           = "csye6225-${local.resource_suffix}"
 }
 
 # Create a uniquely named VPC
@@ -242,7 +257,7 @@ resource "aws_security_group" "database_sg" {
 
 # Create DB Subnet Group using private subnets
 resource "aws_db_subnet_group" "db_subnet_group" {
-  name       = "${local.lowercase_vpc_name}dbsubnetgroup"
+  name       = local.db_subnet_group_name
   subnet_ids = aws_subnet.private_subnets[*].id
 
   tags = {
@@ -252,7 +267,7 @@ resource "aws_db_subnet_group" "db_subnet_group" {
 
 # Create RDS Parameter Group
 resource "aws_db_parameter_group" "db_parameter_group" {
-  name   = "${local.lowercase_vpc_name}dbparamgroup"
+  name   = local.db_parameter_group_name
   family = var.db_parameter_group_family
 
   tags = {
@@ -262,7 +277,7 @@ resource "aws_db_parameter_group" "db_parameter_group" {
 
 # Create RDS Instance
 resource "aws_db_instance" "db_instance" {
-  identifier             = "csye6225"
+  identifier             = local.db_identifier
   allocated_storage      = 20
   storage_type           = "gp2"
   engine                 = var.db_engine
@@ -277,15 +292,21 @@ resource "aws_db_instance" "db_instance" {
   publicly_accessible    = false
   skip_final_snapshot    = true
   multi_az               = false
+  deletion_protection    = false
 
   tags = {
     Name = "${local.unique_vpc_name}-RDS-Instance"
+  }
+
+  # This is important to ensure it can be deleted and recreated
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
 # Create IAM Role for EC2 to access S3
 resource "aws_iam_role" "ec2_s3_access_role" {
-  name = "${local.lowercase_vpc_name}-ec2-s3-access-role"
+  name = local.iam_role_name
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -303,11 +324,16 @@ resource "aws_iam_role" "ec2_s3_access_role" {
   tags = {
     Name = "${local.unique_vpc_name}-EC2-S3-Access-Role"
   }
+
+  # This ensures the role can be recreated if needed
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Create IAM Policy for S3 Access
 resource "aws_iam_policy" "s3_access_policy" {
-  name        = "${local.lowercase_vpc_name}-s3-access-policy"
+  name        = "${local.iam_policy_prefix}-s3-access"
   description = "Policy to allow EC2 access to S3 bucket"
 
   policy = jsonencode({
@@ -328,11 +354,15 @@ resource "aws_iam_policy" "s3_access_policy" {
       }
     ]
   })
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Create IAM Policy for RDS Access
 resource "aws_iam_policy" "ec2_rds_access_policy" {
-  name        = "${local.lowercase_vpc_name}-ec2-rds-access-policy"
+  name        = "${local.iam_policy_prefix}-rds-access"
   description = "Policy to allow EC2 access to RDS instance"
 
   policy = jsonencode({
@@ -354,6 +384,48 @@ resource "aws_iam_policy" "ec2_rds_access_policy" {
       }
     ]
   })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Create CloudWatch IAM Policy
+resource "aws_iam_policy" "cloudwatch_policy" {
+  name        = "${local.iam_policy_prefix}-cloudwatch"
+  description = "Policy to allow EC2 to send logs and metrics to CloudWatch"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ],
+        Effect   = "Allow",
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Action = [
+          "cloudwatch:PutMetricData",
+          "cloudwatch:PutMetricAlarm",
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics",
+          "cloudwatch:DescribeAlarms",
+          "cloudwatch:DescribeAlarmsForMetric"
+        ],
+        Effect   = "Allow",
+        Resource = "*"
+      }
+    ]
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Attach S3 Access Policy to EC2 Role
@@ -374,10 +446,26 @@ resource "aws_iam_role_policy_attachment" "ssm_policy_attachment" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# Attach CloudWatch Policy to EC2 Role
+resource "aws_iam_role_policy_attachment" "cloudwatch_policy_attachment" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = aws_iam_policy.cloudwatch_policy.arn
+}
+
+# Attach AWS Managed CloudWatch Agent Policy
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent_policy_attachment" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 # Create IAM Instance Profile
 resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "${local.lowercase_vpc_name}-ec2-instance-profile"
+  name = local.iam_profile_name
   role = aws_iam_role.ec2_s3_access_role.name
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # EC2 Instance

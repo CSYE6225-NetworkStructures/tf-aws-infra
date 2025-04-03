@@ -1,7 +1,7 @@
 #  tf-aws-infra
 **Terraform Infrastructure for AWS**  
 
-This repository contains Terraform configuration to provision AWS infrastructure, including the **AWS VPC**, **S3**, **RDS** and **AWS EC2** module and configures **CloudWatch** for logging and metrics on EC2. It uses **GitHub Actions for Continuous Integration (CI)** to check formatting and validate Terraform code.
+This repository contains Terraform configuration to provision AWS infrastructure, including the **AWS VPC**, **S3**, **RDS** and **AWS EC2** module and configures **CloudWatch** for logging and metrics on EC2 instances, The **loadbalancer** launces EC2 instances which are **autoscaled** as per the CPU load. It uses **GitHub Actions for Continuous Integration (CI)** to check formatting and validate Terraform code.
 
 ---
 

@@ -52,6 +52,12 @@ locals {
   db_subnet_group_name    = "db-subnet-group-${local.resource_suffix}"
   db_parameter_group_name = "db-param-group-${local.resource_suffix}"
   db_identifier           = "csye6225-${local.resource_suffix}"
+
+  # Load balancer and autoscaling names
+  lb_name              = "app-lb-${local.resource_suffix}"
+  lb_tg_name           = "app-lb-tg-${local.resource_suffix}"
+  asg_name             = "csye6225-asg-${local.resource_suffix}"
+  launch_template_name = "csye6225_asg"
 }
 
 # Create a uniquely named VPC
@@ -136,16 +142,10 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private_rt.id
 }
 
-# Application Security Group
-resource "aws_security_group" "application_sg" {
+# Load Balancer Security Group
+resource "aws_security_group" "lb_sg" {
   vpc_id = aws_vpc.main.id
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  name   = "${local.unique_vpc_name}-LB-SG"
 
   ingress {
     from_port   = 80
@@ -161,11 +161,36 @@ resource "aws_security_group" "application_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${local.unique_vpc_name}-LoadBalancer-SG"
+  }
+}
+
+# Updated Application Security Group
+resource "aws_security_group" "application_sg" {
+  vpc_id = aws_vpc.main.id
+
+  # SSH access
   ingress {
-    from_port   = var.app_port
-    to_port     = var.app_port
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # App port access from load balancer only
+  ingress {
+    from_port       = var.app_port
+    to_port         = var.app_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.lb_sg.id]
   }
 
   egress {
@@ -428,6 +453,31 @@ resource "aws_iam_policy" "cloudwatch_policy" {
   }
 }
 
+# Create Autoscaling IAM Policy
+resource "aws_iam_policy" "autoscaling_policy" {
+  name        = "${local.iam_policy_prefix}-autoscaling"
+  description = "Policy to allow EC2 to work with autoscaling"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances",
+          "autoscaling:DescribeLaunchConfigurations"
+        ],
+        Effect   = "Allow",
+        Resource = "*"
+      }
+    ]
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # Attach S3 Access Policy to EC2 Role
 resource "aws_iam_role_policy_attachment" "s3_policy_attachment" {
   role       = aws_iam_role.ec2_s3_access_role.name
@@ -458,6 +508,12 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_agent_policy_attachment" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
+# Attach Autoscaling Policy to EC2 Role
+resource "aws_iam_role_policy_attachment" "autoscaling_policy_attachment" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = aws_iam_policy.autoscaling_policy.arn
+}
+
 # Create IAM Instance Profile
 resource "aws_iam_instance_profile" "ec2_instance_profile" {
   name = local.iam_profile_name
@@ -468,14 +524,17 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
   }
 }
 
-# EC2 Instance
-resource "aws_instance" "web" {
-  ami                    = var.ami_id
+# Launch Template for Auto Scaling Group
+resource "aws_launch_template" "app_launch_template" {
+  name                   = local.launch_template_name
+  image_id               = var.ami_id
   instance_type          = "t2.micro"
-  subnet_id              = aws_subnet.public_subnets[0].id
-  vpc_security_group_ids = [aws_security_group.application_sg.id]
   key_name               = var.key_name
-  iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
+  vpc_security_group_ids = [aws_security_group.application_sg.id]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_instance_profile.name
+  }
 
   user_data = base64encode(templatefile(var.user_data_script_path, {
     DB_HOST        = aws_db_instance.db_instance.address
@@ -488,19 +547,206 @@ resource "aws_instance" "web" {
     S3_BUCKET_NAME = aws_s3_bucket.app_bucket.bucket
   }))
 
-  user_data_replace_on_change = true
-
-  root_block_device {
-    volume_size           = 25
-    volume_type           = "gp2"
-    delete_on_termination = true
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size           = 25
+      volume_type           = "gp2"
+      delete_on_termination = true
+    }
   }
 
-  disable_api_termination = false
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "${local.unique_vpc_name}-ASG-Instance"
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Application Load Balancer
+resource "aws_lb" "app_lb" {
+  name               = local.lb_name
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.lb_sg.id]
+  subnets            = aws_subnet.public_subnets[*].id
+
+  enable_deletion_protection = false
 
   tags = {
-    Name = "${local.unique_vpc_name}-Web-Instance"
+    Name = "${local.unique_vpc_name}-ALB"
+  }
+}
+
+# Target Group for Load Balancer
+resource "aws_lb_target_group" "app_tg" {
+  name     = local.lb_tg_name
+  port     = var.app_port
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    interval            = 30
+    path                = "/"
+    port                = "traffic-port"
+    healthy_threshold   = 3
+    unhealthy_threshold = 3
+    timeout             = 5
+    matcher             = "200"
   }
 
-  depends_on = [aws_db_instance.db_instance, aws_s3_bucket.app_bucket]
+  tags = {
+    Name = "${local.unique_vpc_name}-TG"
+  }
 }
+
+# Listener for Load Balancer
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+# Auto Scaling Group
+resource "aws_autoscaling_group" "app_asg" {
+  name                = local.asg_name
+  min_size            = 3
+  max_size            = 5
+  desired_capacity    = 3
+  vpc_zone_identifier = aws_subnet.public_subnets[*].id
+  target_group_arns   = [aws_lb_target_group.app_tg.arn]
+
+  launch_template {
+    id      = aws_launch_template.app_launch_template.id
+    version = "$Latest"
+  }
+
+  default_cooldown = 60
+
+  tag {
+    key                 = "Name"
+    value               = "${local.unique_vpc_name}-ASG"
+    propagate_at_launch = true
+  }
+
+  depends_on = [aws_lb_target_group.app_tg]
+}
+
+# Scale up policy when average CPU usage is above 5%
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "${local.asg_name}-scale-up"
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 60
+  policy_type            = "SimpleScaling"
+}
+
+# Scale down policy when average CPU usage is below 3%
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "${local.asg_name}-scale-down"
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 60
+  policy_type            = "SimpleScaling"
+}
+
+# CloudWatch Alarm for High CPU to trigger scale up
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "${local.asg_name}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 5 # 5% CPU utilization
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+
+  alarm_description = "Scale up if CPU exceeds 5% for 2 consecutive periods of 120 seconds"
+  alarm_actions     = [aws_autoscaling_policy.scale_up.arn]
+}
+
+# CloudWatch Alarm for Low CPU to trigger scale down
+resource "aws_cloudwatch_metric_alarm" "low_cpu" {
+  alarm_name          = "${local.asg_name}-low-cpu"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 3 # 3% CPU utilization
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+
+  alarm_description = "Scale down if CPU is below 3% for 2 consecutive periods of 120 seconds"
+  alarm_actions     = [aws_autoscaling_policy.scale_down.arn]
+}
+
+# Route53 Record to point to the Load Balancer
+resource "aws_route53_record" "app_dns" {
+  zone_id = var.route53_zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.app_lb.dns_name
+    zone_id                = aws_lb.app_lb.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Remove the standalone EC2 instance as it's replaced by the ASG
+# resource "aws_instance" "web" {
+#   ami                    = var.ami_id
+#   instance_type          = "t2.micro"
+#   subnet_id              = aws_subnet.public_subnets[0].id
+#   vpc_security_group_ids = [aws_security_group.application_sg.id]
+#   key_name               = var.key_name
+#   iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
+
+#   user_data = base64encode(templatefile(var.user_data_script_path, {
+#     DB_HOST        = aws_db_instance.db_instance.address
+#     DB_PORT        = aws_db_instance.db_instance.port
+#     DB_USER        = aws_db_instance.db_instance.username
+#     DB_PASSWORD    = var.db_password
+#     DB_NAME        = aws_db_instance.db_instance.db_name
+#     PORT           = var.app_port
+#     AWS_REGION     = var.aws_region
+#     S3_BUCKET_NAME = aws_s3_bucket.app_bucket.bucket
+#   }))
+
+#   user_data_replace_on_change = true
+
+#   root_block_device {
+#     volume_size           = 25
+#     volume_type           = "gp2"
+#     delete_on_termination = true
+#   }
+
+#   disable_api_termination = false
+
+#   tags = {
+#     Name = "${local.unique_vpc_name}-Web-Instance"
+#   }
+
+#   depends_on = [aws_db_instance.db_instance, aws_s3_bucket.app_bucket]
+# }

@@ -94,3 +94,13 @@ variable "user_data_script_path" {
   type        = string
   default     = "setup.sh"
 }
+
+variable "route53_zone_id" {
+  description = "The Zone ID of the Route53 Hosted Zone for your domain"
+  type        = string
+}
+
+variable "domain_name" {
+  description = "The domain name to use for the application (e.g., dev.example.com or demo.example.com)"
+  type        = string
+}

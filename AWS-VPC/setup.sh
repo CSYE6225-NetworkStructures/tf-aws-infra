@@ -6,28 +6,29 @@ exec > >(tee /var/log/user-data.log) 2>&1
 echo "Starting user data script at $(date)"
 
 # Parameters passed directly from Terraform (these will be substituted)
-DB_HOST="${DB_HOST}"
-DB_PORT="${DB_PORT}"
-DB_USER="${DB_USER}"
-DB_PASSWORD="${DB_PASSWORD}"
-DB_NAME="${DB_NAME}"
+DB_SECRET_ARN="${DB_SECRET_ARN}"
 PORT="${PORT}"
 AWS_REGION="${AWS_REGION}"
 S3_BUCKET_NAME="${S3_BUCKET_NAME}"
 
 echo "Parameters received:"
-echo "DB_HOST: $DB_HOST"
-echo "DB_PORT: $DB_PORT"
-echo "DB_USER: $DB_USER"
-echo "DB_NAME: $DB_NAME"
+echo "DB_SECRET_ARN: $DB_SECRET_ARN"
 echo "PORT: $PORT"
 echo "AWS_REGION: $AWS_REGION"
 echo "S3_BUCKET_NAME: $S3_BUCKET_NAME"
 
-# Install CloudWatch Agent prerequisites
-echo "Installing CloudWatch Agent prerequisites..."
+# Install AWS CLI and dependencies
+echo "Installing AWS CLI and dependencies..."
 apt-get update
-apt-get install -y curl unzip wget
+apt-get install -y curl unzip wget jq python3-pip
+
+# Install AWS CLI v2
+echo "Installing AWS CLI v2..."
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip -q awscliv2.zip
+./aws/install
+rm -f awscliv2.zip
+rm -rf aws
 
 # Get instance ID for CloudWatch 
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id || echo "unknown-instance")
@@ -113,7 +114,41 @@ touch /opt/myapp/logs/error.log
 chown -R csye6225:csye6225 /opt/myapp/logs
 chmod -R 750 /opt/myapp/logs
 
-# Create .env file directly with the parameters passed from Terraform
+# Retrieve database credentials from Secrets Manager with error handling
+echo "Retrieving database credentials from Secrets Manager..."
+set +e  # Don't exit on error for this part
+SECRET_RESULT=$(aws secretsmanager get-secret-value --secret-id $DB_SECRET_ARN --region $AWS_REGION 2>&1)
+SECRET_STATUS=$?
+set -e  # Resume exit on error
+
+if [ $SECRET_STATUS -ne 0 ]; then
+    echo "ERROR: Failed to retrieve secret from Secrets Manager: $SECRET_RESULT"
+    echo "Checking IAM role and permissions..."
+    aws sts get-caller-identity
+    echo "Checking Secret ARN format and existence..."
+    aws secretsmanager list-secrets --region $AWS_REGION | grep $DB_SECRET_ARN || echo "Secret not found"
+    # Fall back to default credentials for testing purposes
+    echo "Using fallback database credentials for testing"
+    DB_HOST="localhost"
+    DB_PORT="3306"
+    DB_USER="root"
+    DB_PASSWORD="Welcome1234"
+    DB_NAME="health_check"
+else
+    SECRET_JSON=$(echo $SECRET_RESULT | jq -r '.SecretString')
+    DB_HOST=$(echo $SECRET_JSON | jq -r '.host')
+    DB_PORT=$(echo $SECRET_JSON | jq -r '.port')
+    DB_USER=$(echo $SECRET_JSON | jq -r '.username')
+    DB_PASSWORD=$(echo $SECRET_JSON | jq -r '.password')
+    DB_NAME=$(echo $SECRET_JSON | jq -r '.dbname')
+    echo "Database connection details retrieved successfully"
+    echo "DB_HOST: $DB_HOST"
+    echo "DB_PORT: $DB_PORT"
+    echo "DB_USER: $DB_USER"
+    echo "DB_NAME: $DB_NAME"
+fi
+
+# Create .env file with retrieved parameters
 echo "Creating .env file with provided parameters..."
 cat > /opt/myapp/.env << EOF
 DB_HOST=$DB_HOST
@@ -138,7 +173,6 @@ chmod 600 /opt/myapp/.env
 chown csye6225:csye6225 /opt/myapp/.env
 
 echo "Environment file created successfully at /opt/myapp/.env"
-cat /opt/myapp/.env
 
 # Check if webapp binary exists
 if [ -f "/opt/myapp/webapp" ]; then

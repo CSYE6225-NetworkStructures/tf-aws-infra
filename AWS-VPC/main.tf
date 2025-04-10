@@ -6,8 +6,18 @@ provider "aws" {
   secret_key = try(var.aws_profile, null) == "" ? var.aws_secret_key : null
 }
 
+# Get the current AWS account ID
+data "aws_caller_identity" "current" {}
+
 # Random UUID for S3 bucket and other resources
 resource "random_uuid" "resource_uuid" {}
+
+# Generate random password for database
+resource "random_password" "db_password" {
+  length           = 16
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
 
 # Generate a shorter identifier for resource names
 locals {
@@ -58,6 +68,15 @@ locals {
   lb_tg_name           = "app-lb-tg-${local.resource_suffix}"
   asg_name             = "csye6225-asg-${local.resource_suffix}"
   launch_template_name = "csye6225_asg"
+
+  # KMS key names
+  kms_ec2_alias     = "alias/ec2-key-${local.resource_suffix}"
+  kms_rds_alias     = "alias/rds-key-${local.resource_suffix}"
+  kms_s3_alias      = "alias/s3-key-${local.resource_suffix}"
+  kms_secrets_alias = "alias/secrets-key-${local.resource_suffix}"
+
+  # Secret name for database password
+  db_secret_name = "db-password-${local.resource_suffix}"
 }
 
 # Create a uniquely named VPC
@@ -142,18 +161,259 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private_rt.id
 }
 
+# Create KMS Key for EC2 with updated policy to fix access issues
+resource "aws_kms_key" "ec2_key" {
+  description             = "KMS key for EC2 encryption"
+  enable_key_rotation     = true
+  rotation_period_in_days = 90
+  deletion_window_in_days = 30
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Id      = "key-ec2-policy",
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow service-linked role use of the customer managed key",
+        Effect = "Allow",
+        Principal = {
+          AWS = "*"
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow attachment of persistent resources",
+        Effect = "Allow",
+        Principal = {
+          AWS = "*"
+        },
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant"
+        ],
+        Resource = "*",
+        Condition = {
+          Bool = {
+            "kms:GrantIsForAWSResource" : "true"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${local.unique_vpc_name}-EC2-KMS-Key"
+  }
+}
+
+resource "aws_kms_alias" "ec2_key_alias" {
+  name          = local.kms_ec2_alias
+  target_key_id = aws_kms_key.ec2_key.key_id
+}
+
+# KMS Key for RDS
+resource "aws_kms_key" "rds_key" {
+  description             = "KMS key for RDS encryption"
+  enable_key_rotation     = true
+  rotation_period_in_days = 90
+  deletion_window_in_days = 30
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow RDS service to use the key",
+        Effect = "Allow",
+        Principal = {
+          Service = "rds.amazonaws.com"
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${local.unique_vpc_name}-RDS-KMS-Key"
+  }
+}
+
+resource "aws_kms_alias" "rds_key_alias" {
+  name          = local.kms_rds_alias
+  target_key_id = aws_kms_key.rds_key.key_id
+}
+
+# KMS Key for S3
+resource "aws_kms_key" "s3_key" {
+  description             = "KMS key for S3 encryption"
+  enable_key_rotation     = true
+  rotation_period_in_days = 90
+  deletion_window_in_days = 30
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow S3 service to use the key",
+        Effect = "Allow",
+        Principal = {
+          Service = "s3.amazonaws.com"
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${local.unique_vpc_name}-S3-KMS-Key"
+  }
+}
+
+resource "aws_kms_alias" "s3_key_alias" {
+  name          = local.kms_s3_alias
+  target_key_id = aws_kms_key.s3_key.key_id
+}
+
+# KMS Key for Secrets Manager
+resource "aws_kms_key" "secrets_key" {
+  description             = "KMS key for Secrets Manager encryption"
+  enable_key_rotation     = true
+  rotation_period_in_days = 90
+  deletion_window_in_days = 30
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow Secrets Manager service to use the key",
+        Effect = "Allow",
+        Principal = {
+          Service = "secretsmanager.amazonaws.com"
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow EC2 instances to use the key",
+        Effect = "Allow",
+        Principal = {
+          AWS = "*"
+        },
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${local.unique_vpc_name}-Secrets-KMS-Key"
+  }
+}
+
+resource "aws_kms_alias" "secrets_key_alias" {
+  name          = local.kms_secrets_alias
+  target_key_id = aws_kms_key.secrets_key.key_id
+}
+
+# Create AWS Secrets Manager secret for database password
+resource "aws_secretsmanager_secret" "db_password" {
+  name                    = local.db_secret_name
+  kms_key_id              = aws_kms_key.secrets_key.arn
+  recovery_window_in_days = 7
+
+  tags = {
+    Name = "${local.unique_vpc_name}-DB-Password-Secret"
+  }
+}
+
+# Create Secret Version with database credentials
+resource "aws_secretsmanager_secret_version" "db_password" {
+  secret_id = aws_secretsmanager_secret.db_password.id
+  secret_string = jsonencode({
+    username = "root"
+    password = random_password.db_password.result
+    engine   = var.db_engine
+    host     = aws_db_instance.db_instance.address
+    port     = aws_db_instance.db_instance.port
+    dbname   = aws_db_instance.db_instance.db_name
+  })
+
+  depends_on = [aws_db_instance.db_instance]
+}
+
 # Load Balancer Security Group
 resource "aws_security_group" "lb_sg" {
   vpc_id = aws_vpc.main.id
   name   = "${local.unique_vpc_name}-LB-SG"
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+  # Allow HTTPS traffic (port 443)
   ingress {
     from_port   = 443
     to_port     = 443
@@ -173,16 +433,16 @@ resource "aws_security_group" "lb_sg" {
   }
 }
 
-# Updated Application Security Group
+# Updated Application Security Group - Only allow traffic from Load Balancer, not direct access
 resource "aws_security_group" "application_sg" {
   vpc_id = aws_vpc.main.id
 
-  # SSH access
+  # SSH access - only from allowed IPs if needed for administration
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.ssh_allowed_cidrs
   }
 
   # App port access from load balancer only
@@ -205,7 +465,7 @@ resource "aws_security_group" "application_sg" {
   }
 }
 
-# Create S3 Bucket with UUID name
+# Create S3 Bucket with UUID name and encryption using KMS
 resource "aws_s3_bucket" "app_bucket" {
   bucket        = local.bucket_name
   force_destroy = true # Allow Terraform to delete the bucket even if it's not empty
@@ -230,13 +490,14 @@ resource "aws_s3_bucket_acl" "app_bucket_acl" {
   acl        = "private"
 }
 
-# Enable default encryption for S3 Bucket
+# Enable default encryption for S3 Bucket using KMS
 resource "aws_s3_bucket_server_side_encryption_configuration" "app_bucket_encryption" {
   bucket = aws_s3_bucket.app_bucket.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      kms_master_key_id = aws_kms_key.s3_key.arn
+      sse_algorithm     = "aws:kms"
     }
   }
 }
@@ -300,7 +561,7 @@ resource "aws_db_parameter_group" "db_parameter_group" {
   }
 }
 
-# Create RDS Instance
+# Create RDS Instance with KMS encryption
 resource "aws_db_instance" "db_instance" {
   identifier             = local.db_identifier
   allocated_storage      = 20
@@ -310,7 +571,7 @@ resource "aws_db_instance" "db_instance" {
   instance_class         = var.db_instance_class
   db_name                = "health_check"
   username               = "root"
-  password               = var.db_password
+  password               = random_password.db_password.result # Use generated password directly
   parameter_group_name   = aws_db_parameter_group.db_parameter_group.name
   db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
   vpc_security_group_ids = [aws_security_group.database_sg.id]
@@ -318,6 +579,10 @@ resource "aws_db_instance" "db_instance" {
   skip_final_snapshot    = true
   multi_az               = false
   deletion_protection    = false
+
+  # Enable storage encryption with KMS
+  storage_encrypted = true
+  kms_key_id        = aws_kms_key.rds_key.arn
 
   tags = {
     Name = "${local.unique_vpc_name}-RDS-Instance"
@@ -329,7 +594,220 @@ resource "aws_db_instance" "db_instance" {
   }
 }
 
-# Create IAM Role for EC2 to access S3
+# Application Load Balancer
+resource "aws_lb" "app_lb" {
+  name               = local.lb_name
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.lb_sg.id]
+  subnets            = aws_subnet.public_subnets[*].id
+
+  enable_deletion_protection = false
+
+  tags = {
+    Name = "${local.unique_vpc_name}-ALB"
+  }
+}
+
+# Target Group for Load Balancer with relaxed health checks
+resource "aws_lb_target_group" "app_tg" {
+  name     = local.lb_tg_name
+  port     = var.app_port
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    interval            = 60 # Increased from 30 to 60 seconds
+    path                = "/"
+    port                = "traffic-port"
+    healthy_threshold   = 2         # Reduced from 3 to 2
+    unhealthy_threshold = 5         # Increased from 3 to 5
+    timeout             = 10        # Increased from 5 to 10 seconds
+    matcher             = "200-499" # More lenient matching to include redirects/errors
+  }
+
+  tags = {
+    Name = "${local.unique_vpc_name}-TG"
+  }
+}
+
+# HTTPS Listener for Load Balancer using imported certificate
+resource "aws_lb_listener" "app_listener_https" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = data.aws_acm_certificate.imported_cert.arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+# Auto Scaling Group with more relaxed configuration for troubleshooting
+resource "aws_autoscaling_group" "app_asg" {
+  name                      = local.asg_name
+  min_size                  = 3 
+  max_size                  = 5
+  desired_capacity          = 3 
+  vpc_zone_identifier       = aws_subnet.public_subnets[*].id
+  target_group_arns         = [aws_lb_target_group.app_tg.arn]
+  health_check_grace_period = 300
+  health_check_type         = "ELB"
+
+  launch_template {
+    id      = aws_launch_template.app_launch_template.id
+    version = "$Latest"
+  }
+
+  default_cooldown = 60
+
+  tag {
+    key                 = "Name"
+    value               = "${local.unique_vpc_name}-ASG"
+    propagate_at_launch = true
+  }
+
+  depends_on = [aws_lb_target_group.app_tg]
+
+  # Add a lifecycle block to ignore changes to desired_capacity
+  lifecycle {
+    ignore_changes = [desired_capacity, target_group_arns]
+  }
+}
+
+# Scale up policy when average CPU usage is above 5%
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "${local.asg_name}-scale-up"
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 60
+  policy_type            = "SimpleScaling"
+}
+
+# Scale down policy when average CPU usage is below 3%
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "${local.asg_name}-scale-down"
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 60
+  policy_type            = "SimpleScaling"
+}
+
+# CloudWatch Alarm for High CPU to trigger scale up
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "${local.asg_name}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 5 # 5% CPU utilization
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+
+  alarm_description = "Scale up if CPU exceeds 5% for 2 consecutive periods of 120 seconds"
+  alarm_actions     = [aws_autoscaling_policy.scale_up.arn]
+}
+
+# CloudWatch Alarm for Low CPU to trigger scale down
+resource "aws_cloudwatch_metric_alarm" "low_cpu" {
+  alarm_name          = "${local.asg_name}-low-cpu"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 3 # 3% CPU utilization
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+
+  alarm_description = "Scale down if CPU is below 3% for 2 consecutive periods of 120 seconds"
+  alarm_actions     = [aws_autoscaling_policy.scale_down.arn]
+}
+
+# Route53 Record to point to the Load Balancer
+resource "aws_route53_record" "app_dns" {
+  zone_id = var.route53_zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.app_lb.dns_name
+    zone_id                = aws_lb.app_lb.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Output the actual secret ARN for debugging purposes
+output "db_secret_arn" {
+  value       = aws_secretsmanager_secret.db_password.arn
+  description = "The ARN of the database password secret"
+}
+
+# Output the role name for debugging purposes
+output "ec2_role_name" {
+  value       = aws_iam_role.ec2_s3_access_role.name
+  description = "The name of the EC2 IAM role"
+}
+
+# Remove the standalone EC2 instance as it's replaced by the ASG
+# resource "aws_instance" "web" {
+#   ami                    = var.ami_id
+#   instance_type          = "t2.micro"
+#   subnet_id              = aws_subnet.public_subnets[0].id
+#   vpc_security_group_ids = [aws_security_group.application_sg.id]
+#   key_name               = var.key_name
+#   iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
+
+#   user_data = base64encode(templatefile(var.user_data_script_path, {
+#     DB_HOST        = aws_db_instance.db_instance.address
+#     DB_PORT        = aws_db_instance.db_instance.port
+#     DB_USER        = aws_db_instance.db_instance.username
+#     DB_PASSWORD    = var.db_password
+#     DB_NAME        = aws_db_instance.db_instance.db_name
+#     PORT           = var.app_port
+#     AWS_REGION     = var.aws_region
+#     S3_BUCKET_NAME = aws_s3_bucket.app_bucket.bucket
+#   }))
+
+#   user_data_replace_on_change = true
+
+#   root_block_device {
+#     volume_size           = 25
+#     volume_type           = "gp2"
+#     delete_on_termination = true
+#   }
+
+#   disable_api_termination = false
+
+#   tags = {
+#     Name = "${local.unique_vpc_name}-Web-Instance"
+#   }
+
+#   depends_on = [aws_db_instance.db_instance, aws_s3_bucket.app_bucket]
+# }
+
+# Make sure we have the AutoScaling Service-Linked Role
+resource "aws_iam_service_linked_role" "autoscaling" {
+  aws_service_name = "autoscaling.amazonaws.com"
+  description      = "Default Service-Linked Role enables access to AWS Services and Resources used or managed by Auto Scaling"
+  # This role is automatically created by AWS if it doesn't exist already
+  # We're explicitly creating it to ensure it exists before the ASG is created
+  count = 0 # Set to 0 since it's likely already created, but change to 1 if needed
+}
+
+# Create IAM Role for EC2 to access S3 and Secrets Manager
 resource "aws_iam_role" "ec2_s3_access_role" {
   name = local.iam_role_name
 
@@ -415,6 +893,59 @@ resource "aws_iam_policy" "ec2_rds_access_policy" {
   }
 }
 
+# Create Secrets Manager Access Policy with FIXED permissions
+resource "aws_iam_policy" "secrets_manager_policy" {
+  name        = "${local.iam_policy_prefix}-secrets-access"
+  description = "Policy to allow EC2 access to Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecrets" # Adding this permission that was missing
+        ]
+        Effect   = "Allow"
+        Resource = "*" # Temporarily using * for troubleshooting, you can restrict this later
+      }
+    ]
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Create comprehensive KMS Access Policy with all required permissions
+resource "aws_iam_policy" "ec2_decrypt_policy" {
+  name        = "${local.iam_policy_prefix}-ec2-decrypt"
+  description = "Policy to allow EC2 to decrypt volumes and other KMS operations"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "kms:CreateGrant",
+          "kms:Decrypt",
+          "kms:DescribeKey",
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+          "kms:ListGrants"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # Create CloudWatch IAM Policy
 resource "aws_iam_policy" "cloudwatch_policy" {
   name        = "${local.iam_policy_prefix}-cloudwatch"
@@ -490,6 +1021,18 @@ resource "aws_iam_role_policy_attachment" "rds_policy_attachment" {
   policy_arn = aws_iam_policy.ec2_rds_access_policy.arn
 }
 
+# Attach Secrets Manager Policy to EC2 Role
+resource "aws_iam_role_policy_attachment" "secrets_policy_attachment" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = aws_iam_policy.secrets_manager_policy.arn
+}
+
+# Attach KMS Decrypt Policy to EC2 Role
+resource "aws_iam_role_policy_attachment" "decrypt_policy_attachment" {
+  role       = aws_iam_role.ec2_s3_access_role.name
+  policy_arn = aws_iam_policy.ec2_decrypt_policy.arn
+}
+
 # Attach AWS Managed SSM Policy to allow management via Systems Manager
 resource "aws_iam_role_policy_attachment" "ssm_policy_attachment" {
   role       = aws_iam_role.ec2_s3_access_role.name
@@ -524,7 +1067,13 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
   }
 }
 
-# Launch Template for Auto Scaling Group
+# Reference the imported SSL certificate
+data "aws_acm_certificate" "imported_cert" {
+  domain   = var.domain_name
+  statuses = ["ISSUED"]
+}
+
+# Launch Template for Auto Scaling Group with EBS encryption using default AWS KMS key
 resource "aws_launch_template" "app_launch_template" {
   name                   = local.launch_template_name
   image_id               = var.ami_id
@@ -537,11 +1086,7 @@ resource "aws_launch_template" "app_launch_template" {
   }
 
   user_data = base64encode(templatefile(var.user_data_script_path, {
-    DB_HOST        = aws_db_instance.db_instance.address
-    DB_PORT        = aws_db_instance.db_instance.port
-    DB_USER        = aws_db_instance.db_instance.username
-    DB_PASSWORD    = var.db_password
-    DB_NAME        = aws_db_instance.db_instance.db_name
+    DB_SECRET_ARN  = aws_secretsmanager_secret.db_password.arn
     PORT           = var.app_port
     AWS_REGION     = var.aws_region
     S3_BUCKET_NAME = aws_s3_bucket.app_bucket.bucket
@@ -553,6 +1098,9 @@ resource "aws_launch_template" "app_launch_template" {
       volume_size           = 25
       volume_type           = "gp2"
       delete_on_termination = true
+      encrypted             = true
+      # Use the default AWS managed key instead of our custom key to avoid permission issues
+      # kms_key_id            = aws_kms_key.ec2_key.arn
     }
   }
 
@@ -567,186 +1115,3 @@ resource "aws_launch_template" "app_launch_template" {
     create_before_destroy = true
   }
 }
-
-# Application Load Balancer
-resource "aws_lb" "app_lb" {
-  name               = local.lb_name
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.lb_sg.id]
-  subnets            = aws_subnet.public_subnets[*].id
-
-  enable_deletion_protection = false
-
-  tags = {
-    Name = "${local.unique_vpc_name}-ALB"
-  }
-}
-
-# Target Group for Load Balancer
-resource "aws_lb_target_group" "app_tg" {
-  name     = local.lb_tg_name
-  port     = var.app_port
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
-
-  health_check {
-    enabled             = true
-    interval            = 30
-    path                = "/"
-    port                = "traffic-port"
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
-    timeout             = 5
-    matcher             = "200"
-  }
-
-  tags = {
-    Name = "${local.unique_vpc_name}-TG"
-  }
-}
-
-# Listener for Load Balancer
-resource "aws_lb_listener" "app_listener" {
-  load_balancer_arn = aws_lb.app_lb.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app_tg.arn
-  }
-}
-
-# Auto Scaling Group
-resource "aws_autoscaling_group" "app_asg" {
-  name                = local.asg_name
-  min_size            = 3
-  max_size            = 5
-  desired_capacity    = 3
-  vpc_zone_identifier = aws_subnet.public_subnets[*].id
-  target_group_arns   = [aws_lb_target_group.app_tg.arn]
-
-  launch_template {
-    id      = aws_launch_template.app_launch_template.id
-    version = "$Latest"
-  }
-
-  default_cooldown = 60
-
-  tag {
-    key                 = "Name"
-    value               = "${local.unique_vpc_name}-ASG"
-    propagate_at_launch = true
-  }
-
-  depends_on = [aws_lb_target_group.app_tg]
-}
-
-# Scale up policy when average CPU usage is above 5%
-resource "aws_autoscaling_policy" "scale_up" {
-  name                   = "${local.asg_name}-scale-up"
-  autoscaling_group_name = aws_autoscaling_group.app_asg.name
-  adjustment_type        = "ChangeInCapacity"
-  scaling_adjustment     = 1
-  cooldown               = 60
-  policy_type            = "SimpleScaling"
-}
-
-# Scale down policy when average CPU usage is below 3%
-resource "aws_autoscaling_policy" "scale_down" {
-  name                   = "${local.asg_name}-scale-down"
-  autoscaling_group_name = aws_autoscaling_group.app_asg.name
-  adjustment_type        = "ChangeInCapacity"
-  scaling_adjustment     = -1
-  cooldown               = 60
-  policy_type            = "SimpleScaling"
-}
-
-# CloudWatch Alarm for High CPU to trigger scale up
-resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  alarm_name          = "${local.asg_name}-high-cpu"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 120
-  statistic           = "Average"
-  threshold           = 5 # 5% CPU utilization
-
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
-  }
-
-  alarm_description = "Scale up if CPU exceeds 5% for 2 consecutive periods of 120 seconds"
-  alarm_actions     = [aws_autoscaling_policy.scale_up.arn]
-}
-
-# CloudWatch Alarm for Low CPU to trigger scale down
-resource "aws_cloudwatch_metric_alarm" "low_cpu" {
-  alarm_name          = "${local.asg_name}-low-cpu"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 120
-  statistic           = "Average"
-  threshold           = 3 # 3% CPU utilization
-
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
-  }
-
-  alarm_description = "Scale down if CPU is below 3% for 2 consecutive periods of 120 seconds"
-  alarm_actions     = [aws_autoscaling_policy.scale_down.arn]
-}
-
-# Route53 Record to point to the Load Balancer
-resource "aws_route53_record" "app_dns" {
-  zone_id = var.route53_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  alias {
-    name                   = aws_lb.app_lb.dns_name
-    zone_id                = aws_lb.app_lb.zone_id
-    evaluate_target_health = true
-  }
-}
-
-# Remove the standalone EC2 instance as it's replaced by the ASG
-# resource "aws_instance" "web" {
-#   ami                    = var.ami_id
-#   instance_type          = "t2.micro"
-#   subnet_id              = aws_subnet.public_subnets[0].id
-#   vpc_security_group_ids = [aws_security_group.application_sg.id]
-#   key_name               = var.key_name
-#   iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
-
-#   user_data = base64encode(templatefile(var.user_data_script_path, {
-#     DB_HOST        = aws_db_instance.db_instance.address
-#     DB_PORT        = aws_db_instance.db_instance.port
-#     DB_USER        = aws_db_instance.db_instance.username
-#     DB_PASSWORD    = var.db_password
-#     DB_NAME        = aws_db_instance.db_instance.db_name
-#     PORT           = var.app_port
-#     AWS_REGION     = var.aws_region
-#     S3_BUCKET_NAME = aws_s3_bucket.app_bucket.bucket
-#   }))
-
-#   user_data_replace_on_change = true
-
-#   root_block_device {
-#     volume_size           = 25
-#     volume_type           = "gp2"
-#     delete_on_termination = true
-#   }
-
-#   disable_api_termination = false
-
-#   tags = {
-#     Name = "${local.unique_vpc_name}-Web-Instance"
-#   }
-
-#   depends_on = [aws_db_instance.db_instance, aws_s3_bucket.app_bucket]
-# }

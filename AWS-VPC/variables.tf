@@ -45,11 +45,13 @@ variable "app_port" {
 variable "ami_id" {
   description = "AMI ID for EC2 instance"
   type        = string
+  default     = "ami-0b5f68157ae21151d"
 }
 
 variable "key_name" {
   description = "Name of the SSH key pair to use for EC2 instance"
   type        = string
+  default     = "packer_ec2"
 }
 
 variable "db_engine" {
@@ -82,12 +84,7 @@ variable "db_port" {
   default     = 3306
 }
 
-variable "db_password" {
-  description = "Password for the database master user"
-  type        = string
-  sensitive   = true
-  default     = "Welcome1234"
-}
+# Removed the db_password variable as we generate it dynamically now
 
 variable "user_data_script_path" {
   description = "Path to the user data script file"
@@ -98,9 +95,17 @@ variable "user_data_script_path" {
 variable "route53_zone_id" {
   description = "The Zone ID of the Route53 Hosted Zone for your domain"
   type        = string
+  default     = "Z037132013FXVD5YC8420"
 }
 
 variable "domain_name" {
   description = "The domain name to use for the application (e.g., dev.example.com or demo.example.com)"
   type        = string
+  default     = "demo.mayukhsinha.com"
+}
+
+variable "ssh_allowed_cidrs" {
+  description = "List of CIDR blocks allowed to SSH to EC2 instances"
+  type        = list(string)
+  default     = ["0.0.0.0/0"] # Consider restricting this to specific IPs for security
 }

@@ -33,24 +33,19 @@ output "s3_bucket_arn" {
   description = "The ARN of the S3 bucket"
 }
 
-# output "ec2_instance_id" {
-#   value       = aws_instance.web.id
-#   description = "The ID of the EC2 instance"
-# }
+output "kms_keys" {
+  value = {
+    ec2_key_arn     = aws_kms_key.ec2_key.arn
+    rds_key_arn     = aws_kms_key.rds_key.arn
+    s3_key_arn      = aws_kms_key.s3_key.arn
+    secrets_key_arn = aws_kms_key.secrets_key.arn
+  }
+  description = "The ARNs of the KMS keys"
+}
 
-output "env_file_contents" {
-  value       = <<EOF
-DB_HOST=${aws_db_instance.db_instance.address}
-DB_PORT=${aws_db_instance.db_instance.port}
-DB_USER=${aws_db_instance.db_instance.username}
-DB_PASSWORD=${var.db_password}
-DB_NAME=${aws_db_instance.db_instance.db_name}
-PORT=${var.app_port}
-AWS_REGION=${var.aws_region}
-S3_BUCKET_NAME=${aws_s3_bucket.app_bucket.bucket}
-EOF
-  description = "The contents of the .env file"
-  sensitive   = true
+output "secrets_manager_arn" {
+  value       = aws_secretsmanager_secret.db_password.arn
+  description = "The ARN of the Secrets Manager secret storing the DB password"
 }
 
 output "vpc_id" {
@@ -88,18 +83,17 @@ output "s3_bucket_name" {
   description = "The name of the S3 bucket"
 }
 
-# output "ec2_public_ip" {
-#   value       = aws_instance.web.public_ip
-#   description = "The public IP of the EC2 instance"
-# }
+output "certificate_arn" {
+  value       = data.aws_acm_certificate.imported_cert.arn
+  description = "The ARN of the imported SSL certificate"
+}
 
 output "terraform_state_key" {
   value       = "terraform-${var.aws_region}-${replace(var.vpc_cidr, "/", "-")}.tfstate"
   description = "Suggested key for terraform state"
 }
 
-#Load Balancer
-
+# Load Balancer outputs
 output "auto_scaling_group_name" {
   description = "Name of the Auto Scaling Group"
   value       = aws_autoscaling_group.app_asg.name
@@ -123,4 +117,14 @@ output "load_balancer_dns" {
 output "load_balancer_arn" {
   description = "ARN of the Load Balancer"
   value       = aws_lb.app_lb.arn
+}
+
+output "ssl_listener_arn" {
+  description = "ARN of the HTTPS listener"
+  value       = aws_lb_listener.app_listener_https.arn
+}
+
+output "application_url" {
+  description = "The HTTPS URL to access the application"
+  value       = "https://${var.domain_name}"
 }

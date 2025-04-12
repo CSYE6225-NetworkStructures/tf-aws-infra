@@ -160,8 +160,7 @@ resource "aws_route_table_association" "private" {
   subnet_id      = aws_subnet.private_subnets[count.index].id
   route_table_id = aws_route_table.private_rt.id
 }
-
-# Create KMS Key for EC2 with updated policy to fix access issues
+# Create KMS Key for EC2 with least privilege
 resource "aws_kms_key" "ec2_key" {
   description             = "KMS key for EC2 encryption"
   enable_key_rotation     = true
@@ -173,7 +172,7 @@ resource "aws_kms_key" "ec2_key" {
     Id      = "key-ec2-policy",
     Statement = [
       {
-        Sid    = "Enable IAM User Permissions",
+        Sid    = "Enable Key Admin Permissions",
         Effect = "Allow",
         Principal = {
           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
@@ -185,7 +184,7 @@ resource "aws_kms_key" "ec2_key" {
         Sid    = "Allow service-linked role use of the customer managed key",
         Effect = "Allow",
         Principal = {
-          AWS = "*"
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.iam_role_name}"
         },
         Action = [
           "kms:Encrypt",
@@ -201,7 +200,7 @@ resource "aws_kms_key" "ec2_key" {
         Sid    = "Allow attachment of persistent resources",
         Effect = "Allow",
         Principal = {
-          AWS = "*"
+          Service = "ec2.amazonaws.com"
         },
         Action = [
           "kms:CreateGrant",
@@ -228,7 +227,7 @@ resource "aws_kms_alias" "ec2_key_alias" {
   target_key_id = aws_kms_key.ec2_key.key_id
 }
 
-# KMS Key for RDS
+# KMS Key for RDS with least privilege
 resource "aws_kms_key" "rds_key" {
   description             = "KMS key for RDS encryption"
   enable_key_rotation     = true
@@ -239,7 +238,7 @@ resource "aws_kms_key" "rds_key" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "Enable IAM User Permissions",
+        Sid    = "Enable Key Admin Permissions",
         Effect = "Allow",
         Principal = {
           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
@@ -258,8 +257,19 @@ resource "aws_kms_key" "rds_key" {
           "kms:Decrypt",
           "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
-          "kms:DescribeKey",
-          "kms:CreateGrant"
+          "kms:DescribeKey"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow EC2 role to decrypt",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.iam_role_name}"
+        },
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey"
         ],
         Resource = "*"
       }
@@ -276,7 +286,7 @@ resource "aws_kms_alias" "rds_key_alias" {
   target_key_id = aws_kms_key.rds_key.key_id
 }
 
-# KMS Key for S3
+# KMS Key for S3 with least privilege
 resource "aws_kms_key" "s3_key" {
   description             = "KMS key for S3 encryption"
   enable_key_rotation     = true
@@ -287,7 +297,7 @@ resource "aws_kms_key" "s3_key" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "Enable IAM User Permissions",
+        Sid    = "Enable Key Admin Permissions",
         Effect = "Allow",
         Principal = {
           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
@@ -300,6 +310,21 @@ resource "aws_kms_key" "s3_key" {
         Effect = "Allow",
         Principal = {
           Service = "s3.amazonaws.com"
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow EC2 role to use the key for S3 access",
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.iam_role_name}"
         },
         Action = [
           "kms:Encrypt",
@@ -323,7 +348,7 @@ resource "aws_kms_alias" "s3_key_alias" {
   target_key_id = aws_kms_key.s3_key.key_id
 }
 
-# KMS Key for Secrets Manager
+# KMS Key for Secrets Manager with proper service permissions
 resource "aws_kms_key" "secrets_key" {
   description             = "KMS key for Secrets Manager encryption"
   enable_key_rotation     = true
@@ -334,7 +359,7 @@ resource "aws_kms_key" "secrets_key" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "Enable IAM User Permissions",
+        Sid    = "Enable Key Admin Permissions",
         Effect = "Allow",
         Principal = {
           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
@@ -346,7 +371,7 @@ resource "aws_kms_key" "secrets_key" {
         Sid    = "Allow Secrets Manager service to use the key",
         Effect = "Allow",
         Principal = {
-          Service = "secretsmanager.amazonaws.com"
+          AWS = "*"
         },
         Action = [
           "kms:Encrypt",
@@ -358,10 +383,10 @@ resource "aws_kms_key" "secrets_key" {
         Resource = "*"
       },
       {
-        Sid    = "Allow EC2 instances to use the key",
+        Sid    = "Allow EC2 role to decrypt specific secrets",
         Effect = "Allow",
         Principal = {
-          AWS = "*"
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.iam_role_name}"
         },
         Action = [
           "kms:Decrypt",
@@ -609,7 +634,7 @@ resource "aws_lb" "app_lb" {
   }
 }
 
-# Target Group for Load Balancer with relaxed health checks
+# Target Group for Load Balancer
 resource "aws_lb_target_group" "app_tg" {
   name     = local.lb_tg_name
   port     = var.app_port
@@ -618,13 +643,13 @@ resource "aws_lb_target_group" "app_tg" {
 
   health_check {
     enabled             = true
-    interval            = 60 # Increased from 30 to 60 seconds
+    interval            = 60
     path                = "/"
     port                = "traffic-port"
-    healthy_threshold   = 2         # Reduced from 3 to 2
-    unhealthy_threshold = 5         # Increased from 3 to 5
-    timeout             = 10        # Increased from 5 to 10 seconds
-    matcher             = "200-499" # More lenient matching to include redirects/errors
+    healthy_threshold   = 3
+    unhealthy_threshold = 3
+    timeout             = 5
+    matcher             = "200-399"
   }
 
   tags = {
@@ -646,16 +671,16 @@ resource "aws_lb_listener" "app_listener_https" {
   }
 }
 
-# Auto Scaling Group with more relaxed configuration for troubleshooting
+# Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
   name                      = local.asg_name
-  min_size                  = 1 # Reduced from 3 to 1 to make troubleshooting easier
+  min_size                  = 3
   max_size                  = 5
-  desired_capacity          = 1 # Reduced from 3 to 1 for initial deployment
+  desired_capacity          = 3
   vpc_zone_identifier       = aws_subnet.public_subnets[*].id
   target_group_arns         = [aws_lb_target_group.app_tg.arn]
-  health_check_grace_period = 300   # Increased to 5 minutes to give instances more time to start up
-  health_check_type         = "EC2" # Changed from ELB to EC2 for initial testing
+  health_check_grace_period = 300
+  health_check_type         = "ELB"
 
   launch_template {
     id      = aws_launch_template.app_launch_template.id
@@ -904,11 +929,17 @@ resource "aws_iam_policy" "secrets_manager_policy" {
       {
         Action = [
           "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:ListSecrets" # Adding this permission that was missing
-        ]
-        Effect   = "Allow"
-        Resource = "*" # Temporarily using * for troubleshooting, you can restrict this later
+          "secretsmanager:DescribeSecret"
+        ],
+        Effect   = "Allow",
+        Resource = aws_secretsmanager_secret.db_password.arn
+      },
+      {
+        Action = [
+          "secretsmanager:ListSecrets"
+        ],
+        Effect   = "Allow",
+        Resource = "*"
       }
     ]
   })

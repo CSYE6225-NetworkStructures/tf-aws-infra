@@ -45,7 +45,7 @@ variable "app_port" {
 variable "ami_id" {
   description = "AMI ID for EC2 instance"
   type        = string
-  default     = "ami-0b5f68157ae21151d"
+  default     = "ami-06ecf138f6db2dcbf"
 }
 
 variable "key_name" {
